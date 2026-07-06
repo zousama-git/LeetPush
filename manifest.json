@@ -1,0 +1,8 @@
+{
+  "manifest_version": 3,
+  "name": "LeetPush",
+  "version": "1.0.0",
+  "permissions": ["storage", "activeTab", "scripting"],
+  "host_permissions": ["https://api.github.com/*", "https://leetcode.com/*"],
+  "action": { "default_popup": "popup.html" }
+}
