@@ -1,64 +1,163 @@
-(function () {
+(() => {
   let isProcessing = false;
+  let lastHandledSubmission = "";
+  let lastAcceptedAt = 0;
+
+  function containsAcceptedText(node) {
+    if (!node) return false;
+
+    const text = node.nodeType === Node.TEXT_NODE
+      ? node.textContent
+      : node.innerText || node.textContent || "";
+
+    return /\bAccepted\b/i.test(text);
+  }
 
   const observer = new MutationObserver((mutations) => {
     for (const mutation of mutations) {
+      if (mutation.type === "characterData" && containsAcceptedText(mutation.target)) {
+        handleSubmissionSuccess();
+        return;
+      }
+
       for (const node of mutation.addedNodes) {
+        if (containsAcceptedText(node)) {
+          handleSubmissionSuccess();
+          return;
+        }
+
         if (node.nodeType === Node.ELEMENT_NODE) {
-          const resultNode = node.querySelector('[data-e2e-locator="submission-result"]') || node;
-          if (resultNode.innerText && resultNode.innerText.includes("Accepted")) {
+          const resultNode = node.querySelector(
+            '[data-e2e-locator="submission-result"]'
+          );
+
+          if (containsAcceptedText(resultNode)) {
             handleSubmissionSuccess();
+            return;
           }
         }
       }
     }
   });
 
-  observer.observe(document.body, { childList: true, subtree: true });
+  function startObserver() {
+    if (!document.body) {
+      requestAnimationFrame(startObserver);
+      return;
+    }
+
+    observer.observe(document.body, {
+      childList: true,
+      subtree: true,
+      characterData: true
+    });
+  }
+
+  startObserver();
 
   async function handleSubmissionSuccess() {
-    if (isProcessing) return;
-    isProcessing = true;
+    const now = Date.now();
+
+    // LeetCode can mutate the same result several times.
+    if (isProcessing || now - lastAcceptedAt < 5000) return;
 
     const { isEnabled } = await chrome.storage.local.get("isEnabled");
-    if (isEnabled === false) { isProcessing = false; return; }
+    if (isEnabled === false) return;
 
-    setTimeout(async () => {
+    isProcessing = true;
+    lastAcceptedAt = now;
+
+    try {
+      await new Promise(resolve => setTimeout(resolve, 1000));
+
       const payload = extractProblemData();
-      if (payload) { chrome.runtime.sendMessage({ action: "autoPush", payload }); }
-      setTimeout(() => { isProcessing = false; }, 6000);
-    }, 800);
+      if (!payload) {
+        throw new Error("Could not extract the LeetCode solution.");
+      }
+
+      const response = await chrome.runtime.sendMessage({
+        action: "autoPush",
+        payload
+      });
+
+      if (response?.status === "error") {
+        console.error("[LeetPush]", response.message);
+      } else {
+        console.info("[LeetPush]", response?.res || "Pushed successfully.");
+      }
+    } catch (error) {
+      console.error("[LeetPush]", error);
+    } finally {
+      setTimeout(() => {
+        isProcessing = false;
+      }, 1000);
+    }
+  }
+
+  function slugify(text) {
+    return text
+      .toLowerCase()
+      .normalize("NFKD")
+      .replace(/[\u0300-\u036f]/g, "")
+      .replace(/[^a-z0-9]+/g, "-")
+      .replace(/^-+|-+$/g, "");
   }
 
   function extractProblemData() {
     try {
-      const titleEl = document.querySelector('div[class*="text-title-large"]') || document.querySelector('a[class*="text-label-1"]');
-      const titleText = titleEl ? titleEl.innerText.trim() : "000. Unknown";
+      const titleEl =
+        document.querySelector('div[class*="text-title-large"]') ||
+        document.querySelector('a[class*="text-label-1"]');
+
+      const titleText = titleEl
+        ? titleEl.innerText.trim()
+        : "000. Unknown";
 
       const match = titleText.match(/^(\d+)\.\s*(.*)$/);
-      let folderName = "000-unknown";
-      if (match) {
-        folderName = `${match[1].padStart(3, '0')}-${match[2].toLowerCase().replace(/[^a-z0-9]/g, '-').replace(/-+/g, '-')}`;
-      } else {
-        folderName = titleText.toLowerCase().replace(/[^a-z0-9]/g, '-').replace(/-+/g, '-');
-      }
+      const number = match ? match[1].padStart(3, "0") : "000";
+      const name = match ? match[2] : titleText.replace(/^\d+\.\s*/, "");
+
+      const folderName = `${number}-${slugify(name) || "unknown"}`;
 
       let difficulty = "Easy";
       const diffEl = document.querySelector('div[class*="text-difficulty-"]');
+
       if (diffEl) {
         const text = diffEl.innerText.trim().toLowerCase();
-        if (text.includes("medium")) difficulty = "Medium";
-        else if (text.includes("hard")) difficulty = "Hard";
+
+        if (text.includes("hard")) difficulty = "Hard";
+        else if (text.includes("medium")) difficulty = "Medium";
       }
 
-      const descEl = document.querySelector('div[data-track-load="description_content"]');
-      const description = descEl ? descEl.innerText.trim() : "No description retrieved.";
+      const descEl =
+        document.querySelector('[data-track-load="description_content"]');
 
-      const codeLines = Array.from(document.querySelectorAll('.monaco-editor .view-line'))
-        .map(line => line.innerText.replace(/\ua0/g, ' '))
-        .join('\n');
+      const description = descEl
+        ? descEl.innerText.trim()
+        : "No description retrieved.";
 
-      return { title: titleText, folderName, difficulty, description, code: codeLines };
-    } catch (err) { return null; }
+      const codeLines = Array.from(
+        document.querySelectorAll(".monaco-editor .view-line")
+      )
+        .map(line => line.innerText.replace(/\u00a0/g, " "))
+        .join("\n")
+        .trim();
+
+      if (!codeLines) {
+        console.warn("[LeetPush] No code found in Monaco editor.");
+        return null;
+      }
+
+      return {
+        title: titleText,
+        folderName,
+        difficulty,
+        description,
+        code: codeLines
+      };
+    } catch (error) {
+      console.error("[LeetPush] Extraction failed:", error);
+      return null;
+    }
   }
 })();
